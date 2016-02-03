@@ -21,6 +21,7 @@
 import sigrokdecode as srd
 from math import floor, ceil
 from binascii import hexlify
+import struct
 
 '''
 OUTPUT_PYTHON format:
@@ -99,6 +100,7 @@ class Decoder(srd.Decoder):
         ('tx-sync-byte', 'TX Sync byte calculated baudrate'),
         ('rx-packets', 'RX packets'),
         ('tx-packets', 'TX packets'),
+        ('rx-focus', 'Focus Data'),
     )
     annotation_rows = (
         ('rx-packets', 'RX packets', (16,)),
@@ -109,6 +111,7 @@ class Decoder(srd.Decoder):
         ('tx-data', 'TX', (1, 3, 5, 7, 9, 15)),
         ('tx-data-bits', 'TX bits', (13,)),
         ('tx-warnings', 'TX warnings', (11,)),
+        ('rx-focus', 'Focus Data', (18,)),
     )
     binary = (
         ('rx', 'RX dump'),
@@ -126,6 +129,10 @@ class Decoder(srd.Decoder):
     def putpacket(self, rxtx, data):
         s,n = self.packet_start[rxtx],self.samplenum
         self.put(s, n, self.out_ann, data)
+
+    def putfocus(self, rxtx, data):
+        s,n = self.packet_start[rxtx],self.samplenum
+        self.put(s,n, self.out_ann, data)
 
     def putx(self, rxtx, data):
         s, halfbit = self.startsample[rxtx], self.bit_width / 2.0
@@ -242,13 +249,17 @@ class Decoder(srd.Decoder):
         #print("Sync low time was " + str(elapsed_time))
         bit_time = elapsed_time / 5.0 #Sync byte is 1 start bit plus 4 low data bits
         self.baudrate = 1.0 / bit_time
+        if(self.baudrate < 1e6):
+            self.baudrate = 750000.0
+        else:
+            self.baudrate = 1500000.0
         self.bit_width = float(self.samplerate) / self.baudrate
 
         #print("Sync byte detected at " + str(self.samplenum) + " on line " + str(rxtx) + ", detected baudrate was " + str(self.baudrate))
 
         self.state[rxtx] = 'WAIT FOR START BIT'
 
-        self.putsync(rxtx, [rxtx + 14, ['Sync Byte %d' % self.baudrate, 'Sync %d' % self.baudrate, 'S:%d' % self.baudrate]])
+        #self.putsync(rxtx, [rxtx + 14, ['Sync Byte %d' % self.baudrate, 'Sync %d' % self.baudrate, 'S:%d' % self.baudrate]])
 
     def wait_for_start_bit(self, rxtx, old_signal, signal):
         # The start bit is always 0 (low). As the idle UART (and the stop bit)
@@ -415,7 +426,25 @@ class Decoder(srd.Decoder):
                     #print("CS went low on line " + str(rxtx) + " at time " + str(float(self.samplenum)/float(self.samplerate)))
                     if(self.state[rxtx] == 'WAIT FOR START BIT'):
                         packetdata = ''.join([self.escapebyte(b) for b in self.packetdata[rxtx]])
-                        self.putpacket(rxtx, [rxtx + 16, ['Packet id: {:02X}, rxtx: {}, length: {}, data: "{}"'.format(self.packetid[rxtx],rxtx,len(self.packetdata[rxtx]),packetdata)]])
+                        self.putpacket(rxtx, [rxtx + 16, ['{:0.6f}, Packet id: {:02X}, rxtx: {}, length: {}, data: "{}"'.format(self.packet_start[rxtx]/self.samplerate,self.packetid[rxtx],rxtx,len(self.packetdata[rxtx]),packetdata)]])
+                        if(self.packetid[rxtx] == 0x30):
+                            self.putfocus(rxtx, [18, ['{:0.6f}, {}, {}, , , , '.format(self.packet_start[rxtx]/self.samplerate,
+                                                                                self.packetdata[rxtx][7]*256+self.packetdata[rxtx][6],
+                                                                                self.packetdata[rxtx][25]*256+self.packetdata[rxtx][24]
+                                                                          )]])
+                        if(self.packetid[rxtx] == 0x32):
+                            self.putfocus(rxtx, [18, ['{:0.6f}, , , {}, {}, , '.format(self.packet_start[rxtx]/self.samplerate,
+                                                                                self.packetdata[rxtx][9]*256+self.packetdata[rxtx][8],
+                                                                                self.packetdata[rxtx][27]*256+self.packetdata[rxtx][26]
+                                                                          )]])
+                        if(self.packetid[rxtx] == 0x34):
+                            self.putfocus(rxtx, [18, ['{:0.6f}, , , , , {}, '.format(self.packet_start[rxtx]/self.samplerate,
+                                                                              self.packetdata[rxtx][11]*256+self.packetdata[rxtx][10]
+                                                                          )]])
+                        if(self.packetid[rxtx] == 0x27):
+                            self.putfocus(rxtx, [18, ['{:0.6f}, , , , , , {}'.format(self.packet_start[rxtx]/self.samplerate,
+                                                                              self.packetdata[rxtx][26]*256+self.packetdata[rxtx][25]
+                                                                          )]])
                     self.packetdata[rxtx] = []
                     self.packetid[rxtx] = 0
                     self.state[rxtx] = 'WAIT FOR CS'
