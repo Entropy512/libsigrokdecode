@@ -176,7 +176,6 @@ class Decoder(srd.Decoder):
         self.bit_order = 'lsb-first'
 
         #New e-mount stuff...  Probably want to move this into an upper-level decoder
-        self.packetid = [0,0]
         self.packetdata = [[],[]]
         self.packet_start = [-1,-1]
         self.packet_end = [-1,-1]
@@ -327,8 +326,8 @@ class Decoder(srd.Decoder):
         self.putpx(rxtx, ['DATA', rxtx,
             (self.databyte[rxtx], self.databits[rxtx])])
 
-        if(self.packetid[rxtx] == 0):
-            self.packetid[rxtx] = self.databyte[rxtx]
+        if(len(self.packetdata[rxtx]) == 0):
+            self.packetdata[rxtx].append(self.databyte[rxtx])
             self.packet_start[rxtx] = self.frame_start[rxtx]
         else:
             self.packetdata[rxtx].append(self.databyte[rxtx])
@@ -425,28 +424,31 @@ class Decoder(srd.Decoder):
                 if(cs_signal == 0 and self.oldcs[rxtx] == 1):
                     #print("CS went low on line " + str(rxtx) + " at time " + str(float(self.samplenum)/float(self.samplerate)))
                     if(self.state[rxtx] == 'WAIT FOR START BIT'):
-                        packetdata = ''.join([self.escapebyte(b) for b in self.packetdata[rxtx]])
-                        self.putpacket(rxtx, [rxtx + 16, ['{:0.6f}, Packet id: {:02X}, rxtx: {}, length: {}, data: "{}"'.format(self.packet_start[rxtx]/self.samplerate,self.packetid[rxtx],rxtx,len(self.packetdata[rxtx]),packetdata)]])
-                        if(self.packetid[rxtx] == 0x30):
-                            self.putfocus(rxtx, [18, ['{:0.6f}, {}, {}, , , , '.format(self.packet_start[rxtx]/self.samplerate,
-                                                                                self.packetdata[rxtx][7]*256+self.packetdata[rxtx][6],
-                                                                                self.packetdata[rxtx][25]*256+self.packetdata[rxtx][24]
-                                                                          )]])
-                        if(self.packetid[rxtx] == 0x32):
-                            self.putfocus(rxtx, [18, ['{:0.6f}, , , {}, {}, , '.format(self.packet_start[rxtx]/self.samplerate,
-                                                                                self.packetdata[rxtx][9]*256+self.packetdata[rxtx][8],
-                                                                                self.packetdata[rxtx][27]*256+self.packetdata[rxtx][26]
-                                                                          )]])
-                        if(self.packetid[rxtx] == 0x34):
-                            self.putfocus(rxtx, [18, ['{:0.6f}, , , , , {}, '.format(self.packet_start[rxtx]/self.samplerate,
-                                                                              self.packetdata[rxtx][11]*256+self.packetdata[rxtx][10]
-                                                                          )]])
-                        if(self.packetid[rxtx] == 0x27):
-                            self.putfocus(rxtx, [18, ['{:0.6f}, , , , , , {}'.format(self.packet_start[rxtx]/self.samplerate,
-                                                                              self.packetdata[rxtx][26]*256+self.packetdata[rxtx][25]
-                                                                          )]])
+                        packetbytes = bytes(self.packetdata[rxtx])
+                        (packetlen,pkt_type,seqnum) = struct.unpack_from("<HBB",packetbytes)
+                        packetlen -= 1
+                        (checksum,stopbyte) = struct.unpack_from("<HB",packetbytes,packetlen-3)
+                        packetdata_hex = ''.join([self.escapebyte(b) for b in self.packetdata[rxtx][4:packetlen-3]])
+                        self.putpacket(rxtx, [rxtx + 16, ['{:0.6f}, Plen: {:04X}, ftype: {:02X}, snum: {:02X}, speed: {}, rxtx: {}, extra: {}, csum: {:04X}, data: "{}"'.format(self.packet_start[rxtx]/self.samplerate,packetlen+1,pkt_type,seqnum,self.baudrate,rxtx,len(self.packetdata[rxtx])-packetlen,checksum,packetdata_hex)]])
+#                        if(self.packetid[rxtx] == 0x30):
+#                            self.putfocus(rxtx, [18, ['{:0.6f}, {}, {}, , , , '.format(self.packet_start[rxtx]/self.samplerate,
+#                                                                                self.packetdata[rxtx][7]*256+self.packetdata[rxtx][6],
+#                                                                                self.packetdata[rxtx][25]*256+self.packetdata[rxtx][24]
+#                                                                          )]])
+#                        if(self.packetid[rxtx] == 0x32):
+#                            self.putfocus(rxtx, [18, ['{:0.6f}, , , {}, {}, , '.format(self.packet_start[rxtx]/self.samplerate,
+#                                                                                self.packetdata[rxtx][9]*256+self.packetdata[rxtx][8],
+#                                                                                self.packetdata[rxtx][27]*256+self.packetdata[rxtx][26]
+#                                                                          )]])
+#                        if(self.packetid[rxtx] == 0x34):
+#                            self.putfocus(rxtx, [18, ['{:0.6f}, , , , , {}, '.format(self.packet_start[rxtx]/self.samplerate,
+#                                                                              self.packetdata[rxtx][11]*256+self.packetdata[rxtx][10]
+#                                                                          )]])
+#                        if(self.packetid[rxtx] == 0x27):
+#                            self.putfocus(rxtx, [18, ['{:0.6f}, , , , , , {}'.format(self.packet_start[rxtx]/self.samplerate,
+#                                                                              self.packetdata[rxtx][26]*256+self.packetdata[rxtx][25]
+#                                                                          )]])
                     self.packetdata[rxtx] = []
-                    self.packetid[rxtx] = 0
                     self.state[rxtx] = 'WAIT FOR CS'
 
                 # Save current RX/TX values for the next round.
