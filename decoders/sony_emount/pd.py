@@ -57,20 +57,21 @@ class ChannelError(Exception):
     pass
 
 class Decoder(srd.Decoder):
-    api_version = 2
+    api_version = 3
     id = 'sony_emount'
     name = 'E-Mount'
     longname = 'Sony E-Mount lens protocol'
     desc = 'Lens control for interchangeable lens camera.'
     license = 'gplv2+'
     inputs = ['logic']
-    outputs = ['uart']
+    outputs = ['sony_emount']
+    tags = ['Embedded/industrial']
     channels = (
         # Allow specifying only one of the signals, e.g. if only one data
         # direction exists (or is relevant).
-        {'id': 'rx_cs', 'name': 'LENS_CS_BODY', 'desc': 'Lens data RX handshake'},
         {'id': 'rx', 'name': 'RXD', 'desc': 'Lens data receive line'},
         {'id': 'tx', 'name': 'TXD', 'desc': 'Lens data transmit line'},
+        {'id': 'rx_cs', 'name': 'LENS_CS_BODY', 'desc': 'Lens data RX handshake'},
         {'id': 'tx_cs', 'name': 'BODY_CS_LENS', 'desc': 'Lens data TX handshake'},
     )
     options = (
@@ -154,7 +155,10 @@ class Decoder(srd.Decoder):
         s, halfbit = self.startsample[rxtx], self.bit_width / 2.0
         self.put(s - floor(halfbit), self.samplenum + ceil(halfbit), self.out_bin, data)
 
-    def __init__(self, **kwargs):
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
         self.samplerate = None
         self.samplenum = 0
         self.frame_start = [-1, -1]
@@ -166,9 +170,9 @@ class Decoder(srd.Decoder):
         self.stopbit1 = [-1, -1]
         self.startsample = [-1, -1]
         self.state = ['WAIT FOR CS', 'WAIT FOR CS']
-        self.oldbit = [1, 1]
-        self.oldcs = [0, 0]
-        self.oldpins = [1, 1]
+#        self.oldbit = [1, 1]
+#        self.oldcs = [0, 0]
+#        self.oldpins = [1, 1]
         self.databits = [[], []]
         #The below were optional in the uart module, but are fixed for e-mount
         self.baudrate = 750000.0 #This will be adjusted by sync byte detection eventually
@@ -191,8 +195,8 @@ class Decoder(srd.Decoder):
             # The width of one UART bit in number of samples.
             self.bit_width = float(self.samplerate) / self.baudrate
 
-    # Return true if we reached the middle of the desired bit, false otherwise.
-    def reached_bit(self, rxtx, bitnum):
+    def get_sample_point(self, rxtx, bitnum):
+        """Determine absolute sample number of a bit slot's sample point."""
         # bitpos is the samplenumber which is in the middle of the
         # specified UART bit (0 = start bit, 1..x = data, x+1 = parity bit
         # (if used) or the first stop bit, and so on).
@@ -200,19 +204,18 @@ class Decoder(srd.Decoder):
         # index of the middle sample within bit window is (bit_width - 1) / 2.
         bitpos = self.frame_start[rxtx] + (self.bit_width - 1) / 2.0
         bitpos += bitnum * self.bit_width
+        return bitpos
+
+    # Return true if we reached the middle of the desired bit, false otherwise.
+    def reached_bit(self, rxtx, bitnum):
+        bitpos = self.get_sample_point(rxtx, bitnum)
         if self.samplenum >= bitpos:
             return True
         return False
 
-    def reached_bit_last(self, rxtx, bitnum):
-        bitpos = self.frame_start[rxtx] + ((bitnum + 1) * self.bit_width)
-        if self.samplenum >= bitpos:
-            return True
-        return False
-
-    def wait_for_cs(self, rxtx, old_signal, signal):
+    def wait_for_cs(self, rxtx, signal):
         #CS is normally low and active high, wait for it to rise
-        if not (old_signal == 0 and signal == 1):
+        if signal != 1:
             return
 
         # TODO: Save where CS went high - The line below is from wait_for_start_bit, needs to be reworked
@@ -222,14 +225,9 @@ class Decoder(srd.Decoder):
 
         self.state[rxtx] = 'WAIT FOR SYNC BYTE'
 
-    def wait_for_sync(self, rxtx, old_data, data, old_cs, cs):
-        if (old_cs == 1 and cs == 0):
-            self.state[rxtx] = 'WAIT FOR CS'
-            #print("CS went low without sync, returning to waiting for CS, line " + str(rxtx))
-            return
-
+    def wait_for_sync(self, rxtx, data):
         #Sync byte is always a low start bit followed by five more low bits
-        if not (old_data == 1 and data == 0):
+        if data != 0:
             return
 
         #Save the sample number where the sync byte begins
@@ -238,8 +236,8 @@ class Decoder(srd.Decoder):
 
         self.state[rxtx] = 'GET SYNC RATE'
 
-    def get_sync_rate(self, rxtx, old_signal, signal):
-        if not (old_signal == 0 and signal == 1):
+    def get_sync_rate(self, rxtx, signal):
+        if signal != 1:
             return
 
         elapsed_samples = self.samplenum - self.sync_start[rxtx]
@@ -260,10 +258,11 @@ class Decoder(srd.Decoder):
 
         #self.putsync(rxtx, [rxtx + 14, ['Sync Byte %d' % self.baudrate, 'Sync %d' % self.baudrate, 'S:%d' % self.baudrate]])
 
-    def wait_for_start_bit(self, rxtx, old_signal, signal):
-        # The start bit is always 0 (low). As the idle UART (and the stop bit)
-        # level is 1 (high), the beginning of a start bit is a falling edge.
-        if not (old_signal == 1 and signal == 0):
+    def wait_for_start_bit(self, rxtx, signal):
+        # The caller already has detected an edge. Strictly speaking this
+        # check on the current signal level is redundant. But it does not
+        # harm either.
+        if signal != 0:
             return
 
         # Save the sample number where the start bit begins.
@@ -377,26 +376,61 @@ class Decoder(srd.Decoder):
         self.putp(['STOPBIT', rxtx, self.stopbit1[rxtx]])
 #        self.putg([rxtx + 4, ['Stop bit', 'Stop', 'T']])
 
-    def decode(self, ss, es, data):
+    def get_wait_cond(self, rxtx, inv):
+        """
+        Determine Decoder.wait() condition for specified UART line.
+        Returns condititions that are suitable for Decoder.wait(). Those
+        conditions either match the falling edge of the START bit, or
+        the sample point of the next bit time.
+        """
+
+        state = self.state[rxtx]
+        if state == 'WAIT FOR CS':
+            return {rxtx + 2: 'f' if inv else 'r'}
+        elif state == 'WAIT FOR SYNC BYTE':
+            return {rxtx: 'r' if inv else 'f'}
+        elif state == 'GET SYNC RATE':
+            return {rxtx: 'f' if inv else 'r'}
+        if state == 'WAIT FOR START BIT':
+            return {rxtx: 'r' if inv else 'f'}
+        if state == 'GET START BIT':
+            bitnum = 0
+        elif state == 'GET DATA BITS':
+            bitnum = 1 + self.cur_data_bit[rxtx]
+        elif state == 'GET PARITY BIT':
+            bitnum = 1 + self.num_data_bits
+        elif state == 'GET STOP BITS':
+            bitnum = 1 + self.num_data_bits
+            #emount never has parity
+            #bitnum += 0 if self.options['parity_type'] == 'none' else 1
+        want_num = self.get_sample_point(rxtx, bitnum)
+        # want_num = int(want_num + 0.5)
+        want_num = ceil(want_num)
+        cond = {'skip': want_num - self.samplenum}
+        return cond
+
+    def decode(self):
         if not self.samplerate:
             raise SamplerateError('Cannot decode without samplerate.')
-        for (self.samplenum, pins) in data:
 
-            # Note: Ignoring identical samples here for performance reasons
-            # is not possible for this PD, at least not in the current state.
-            # if self.oldpins == pins:
-            #     continue
-            self.oldpins, (rx_cs, rx, tx, tx_cs) = pins, pins
+        opt = self.options
+        inv = [opt['invert_rx'] == 'yes', opt['invert_tx'] == 'yes']
 
-            if self.options['invert_rx'] == 'yes':
+        while True:
+            conds = []
+            conds.append(self.get_wait_cond(RX, inv[RX]))
+            conds.append(self.get_wait_cond(TX, inv[TX]))
+            for rxtx in (RX, TX):
+                if not (self.state[rxtx] == 'WAIT_FOR_CS'):
+                    conds.append({rxtx + 2: 'r' if inv[rxtx] else 'f'})
+
+            (rx, tx, rx_cs, tx_cs) = self.wait(conds)
+            if inv[RX]:
                 rx = not rx
-            if self.options['invert_tx'] == 'yes':
+                rx_cs = not rx_cs
+            if inv[TX]:
                 tx = not tx
-
-            # Either RX or TX (but not both) can be omitted.
-            has_pin = [rx_cs in (0,1), rx in (0, 1), tx in (0, 1), tx_cs in (0,1)]
-            if not (has_pin == [True, True, True, True]):
-                raise ChannelError('RX, TX, and both CS pins are required.')
+                tx_cs = not tx_cs
 
             # State machine.
             for rxtx in (RX, TX):
@@ -405,13 +439,13 @@ class Decoder(srd.Decoder):
                 cs_signal = rx_cs if (rxtx == RX) else tx_cs
 
                 if self.state[rxtx] == 'WAIT FOR CS':
-                    self.wait_for_cs(rxtx, self.oldcs[rxtx], cs_signal)
+                    self.wait_for_cs(rxtx, cs_signal)
                 elif self.state[rxtx] == 'WAIT FOR SYNC BYTE':
-                    self.wait_for_sync(rxtx, self.oldbit[rxtx], data_signal, self.oldcs[rxtx], cs_signal)
+                    self.wait_for_sync(rxtx, data_signal)
                 elif self.state[rxtx] == 'GET SYNC RATE':
-                    self.get_sync_rate(rxtx, self.oldbit[rxtx], data_signal)
+                    self.get_sync_rate(rxtx, data_signal)
                 elif self.state[rxtx] == 'WAIT FOR START BIT':
-                    self.wait_for_start_bit(rxtx, self.oldbit[rxtx], data_signal)
+                    self.wait_for_start_bit(rxtx, data_signal)
                 elif self.state[rxtx] == 'GET START BIT':
                     self.get_start_bit(rxtx, data_signal)
                 elif self.state[rxtx] == 'GET DATA BITS':
@@ -421,7 +455,7 @@ class Decoder(srd.Decoder):
                 elif self.state[rxtx] == 'GET STOP BITS':
                     self.get_stop_bits(rxtx, data_signal)
 
-                if(cs_signal == 0 and self.oldcs[rxtx] == 1):
+                if(cs_signal == 0 and not (self.state[rxtx] == 'WAIT FOR CS')):
                     #print("CS went low on line " + str(rxtx) + " at time " + str(float(self.samplenum)/float(self.samplerate)))
                     if(self.state[rxtx] == 'WAIT FOR START BIT'):
                         packetbytes = bytes(self.packetdata[rxtx])
@@ -452,5 +486,5 @@ class Decoder(srd.Decoder):
                     self.state[rxtx] = 'WAIT FOR CS'
 
                 # Save current RX/TX values for the next round.
-                self.oldbit[rxtx] = data_signal
-                self.oldcs[rxtx] = cs_signal
+#                self.oldbit[rxtx] = data_signal
+#                self.oldcs[rxtx] = cs_signal
