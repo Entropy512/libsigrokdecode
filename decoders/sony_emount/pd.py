@@ -415,16 +415,19 @@ class Decoder(srd.Decoder):
 
         opt = self.options
         inv = [opt['invert_rx'] == 'yes', opt['invert_tx'] == 'yes']
-
+        cond_idx = [None] * 3
+        cond_idx[0] = 0
+        
         while True:
             conds = []
-            conds.append(self.get_wait_cond(RX, inv[RX]))
-            conds.append(self.get_wait_cond(TX, inv[TX]))
             for rxtx in (RX, TX):
+                conds.append(self.get_wait_cond(rxtx, inv[rxtx]))
                 if not (self.state[rxtx] == 'WAIT_FOR_CS'):
                     conds.append({rxtx + 2: 'r' if inv[rxtx] else 'f'})
+                cond_idx[rxtx + 1] = len(conds)
 
             (rx, tx, rx_cs, tx_cs) = self.wait(conds)
+
             if inv[RX]:
                 rx = not rx
                 rx_cs = not rx_cs
@@ -434,7 +437,15 @@ class Decoder(srd.Decoder):
 
             # State machine.
             for rxtx in (RX, TX):
+                found_match = False
+                for j in range(cond_idx[rxtx],cond_idx[rxtx+1]):
+                    #print(str(rxtx) + " " + str(j) + " " + str(self.matched[j]))
+                    if self.matched[j]:
+                        found_match = True
+                if not found_match:
+                    continue
 
+                #print(str(rxtx) + " " + str(self.samplenum/self.samplerate) + " " + self.state[rxtx] + " " + str(conds))
                 data_signal = rx if (rxtx == RX) else tx
                 cs_signal = rx_cs if (rxtx == RX) else tx_cs
 
@@ -455,7 +466,7 @@ class Decoder(srd.Decoder):
                 elif self.state[rxtx] == 'GET STOP BITS':
                     self.get_stop_bits(rxtx, data_signal)
 
-                if(cs_signal == 0 and not (self.state[rxtx] == 'WAIT FOR CS')):
+                if(cs_signal == 0):
                     #print("CS went low on line " + str(rxtx) + " at time " + str(float(self.samplenum)/float(self.samplerate)))
                     if(self.state[rxtx] == 'WAIT FOR START BIT'):
                         packetbytes = bytes(self.packetdata[rxtx])
